@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 golang:1.20
+FROM --platform=linux/amd64 golang:1.25rc3
 RUN \
     cd /tmp && \
     go install github.com/go-delve/delve/cmd/dlv@latest && \
