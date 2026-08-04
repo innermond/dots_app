@@ -137,7 +137,7 @@ func createUser(ctx context.Context, tx *Tx, u *dots.User) error {
 
 	err := tx.QueryRowContext(
 		ctx, `
-		INSERT INTO "user" (
+		INSERT INTO core."user" (
 			name,
 			email,
 			api_key,
@@ -189,7 +189,7 @@ func updateUser(ctx context.Context, tx *Tx, id ksuid.KSUID, updata *dots.UserUp
 	args = append(args, id)
 
 	sqlstr := `
-		update "user"
+		update core."user"
 		set ` + strings.Join(set, ", ") + `
 		where	id = ` + fmt.Sprintf("$%d", len(args))
 
@@ -226,7 +226,7 @@ func findUser(ctx context.Context, tx *Tx, filter dots.UserFilter) (_ []*dots.Us
     array_to_json(powers),
 		created_at, updated_at,
 		count(*) over()
-	from "user" u
+	from core."user" u
 	where	%s %s`,
 		strings.Join(where, " and "),
 		formatLimitOffset(filter.Limit, filter.Offset),
@@ -303,7 +303,7 @@ func deleteUser(ctx context.Context, tx *Tx, id ksuid.KSUID) error {
 		return dots.Errorf(dots.ENOTFOUND, "user not found")
 	}
 
-	_, err = tx.ExecContext(ctx, `delete from "user" where id = $1`, id)
+	_, err = tx.ExecContext(ctx, `delete from core."user" where id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("postgres.user: cannot delete user: %w", err)
 	}

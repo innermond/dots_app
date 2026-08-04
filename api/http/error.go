@@ -1,7 +1,6 @@
 package http
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -10,7 +9,7 @@ import (
 )
 
 func Error(w http.ResponseWriter, r *http.Request, err error) {
-	code, message := dots.ErrorCode(err), dots.ErrorMessage(err)
+	code, message, data := dots.ErrorCode(err), dots.ErrorMessage(err), dots.ErrorData(err)
 	deverr := err
 	logit := false
 	if werr := errors.Unwrap(err); werr != nil {
@@ -21,20 +20,18 @@ func Error(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("[http] error: %s %s %s", r.Method, r.URL.Path, deverr)
 	}
 
-	errorStatus := errorStatusFromCode(code)
-	w.WriteHeader(errorStatus)
-
-	switch r.Header.Get("Accept") {
-	case "application/json":
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(&errorResponse{Error: message})
-	default:
-		w.Write([]byte(message))
+	status := errorStatusFromCode(code)
+	resp := errorResponse{Error: message}
+	if len(data) != 0 {
+		resp.Data = data
 	}
+
+	outputJSON(w, r, status, &resp)
 }
 
 type errorResponse struct {
-	Error string `json:"error"`
+	Error string                 `json:"error"`
+	Data  map[string]interface{} `json:"data,omitempty"`
 }
 
 var codes = map[string]int{

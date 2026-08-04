@@ -9,7 +9,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
@@ -38,18 +40,36 @@ type Server struct {
 	DeedService      dots.DeedService
 }
 
+// TODO is this handler ever called?
+func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("request serving")
+	s.router.ServeHTTP(w, r)
+	fmt.Println("request done")
+}
+
 func NewServer() *Server {
-	s := &Server{
-		server: &http.Server{},
-		router: mux.NewRouter().PathPrefix("/v1").Subrouter(),
+	router := mux.NewRouter().PathPrefix("/v1").Subrouter()
+	httpsrv := http.Server{
+		ReadTimeout:       1 * time.Second,
+		WriteTimeout:      1 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+		Handler:           http.TimeoutHandler(router, 10*time.Second, "Overall timeout reached"),
 	}
+	s := &Server{
+		server: &httpsrv,
+		router: router,
+	}
+	//s.server.Handler = s.router //http.HandlerFunc(s.serveHTTP)
 
 	// because it uses defer it must be called first
 	// so its defer function will be the last in the stack, like a safety net
 	s.router.Use(reportPanic)
-	s.server.Handler = http.HandlerFunc(s.serveHTTP)
+	s.router.Use(s.allowRequestsFromApp)
 	s.router.NotFoundHandler = http.HandlerFunc(s.handleNotFound)
-	s.router.Use(s.authenticate)
+	s.router.Use(s.devine, s.interceptAbort, s.authenticate)
+
+	s.router.Methods("OPTIONS")
 
 	s.router.HandleFunc("/", s.handleIndex).Methods("GET")
 
@@ -96,10 +116,6 @@ func NewServer() *Server {
 	}
 
 	return s
-}
-
-func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	s.router.ServeHTTP(w, r)
 }
 
 func (s *Server) Close() error {
@@ -161,7 +177,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	status := http.StatusOK
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(&ses)
 }
 
@@ -234,7 +251,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 func (s *Server) yesAuthenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u := dots.UserFromContext(r.Context())
-		if u.ID != ksuid.Nil {
+		if !u.ID.IsNil() {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -263,5 +280,96 @@ func (s *Server) noAuthenticate(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) allowRequestsFromApp(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow multiple origins
+		allowedOrigins := []string{"http://www.dots.volt.com", "http://localhost:3000"}
+		origin := r.Header.Get("Origin")
+
+		allowed := false
+		for _, o := range allowedOrigins {
+			if o == origin {
+				allowed = true
+				break
+			}
+		}
+
+		if allowed {
+			// Set the appropriate headers to allow the requested origin
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-Id")
+		}
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// only for development
+func (s *Server) devine(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		devstatus := r.URL.Query().Get("devstatus")
+		if devstatus != "" {
+			status, err := strconv.Atoi(devstatus)
+			if err != nil {
+				status = http.StatusInternalServerError
+			}
+			w.WriteHeader(status)
+		}
+
+		devsleep := r.URL.Query().Get("devsleep")
+		if devsleep != "" {
+			sleep, err := strconv.Atoi(devsleep)
+			if err == nil {
+				time.Sleep(time.Duration(sleep) * time.Second)
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// only for development
+func (s *Server) interceptAbort(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Println(r.Method, r.URL)
+
+		cancel, ctx := dots.NewContextWithTourist(r.Context())
+		defer cancel()
+
+		visited := []string{}
+		tourist := dots.TouristFromContext(ctx)
+
+		r = r.WithContext(ctx)
+
+		c := make(chan struct{})
+		go func() {
+			next.ServeHTTP(w, r)
+			c <- struct{}{}
+		}()
+
+	outselect:
+		for {
+			select {
+			case v := <-tourist:
+				visited = append(visited, v)
+			case <-ctx.Done():
+				fmt.Println("request aborted")
+				break outselect
+			case <-c:
+				fmt.Println("request done")
+				break outselect
+			}
+		}
+
+		fmt.Println(visited)
+
 	})
 }

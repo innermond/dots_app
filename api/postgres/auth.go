@@ -135,7 +135,7 @@ func createAuth(ctx context.Context, tx *Tx, auth *dots.Auth) (err error) {
 		expiry = &_expiry
 	}
 
-	sqlstr := `INSERT INTO "auth" (
+	sqlstr := `INSERT INTO core."auth" (
 		user_id, 
 		source, source_id, 
 		access_token, refresh_token, 
@@ -191,8 +191,8 @@ func findAuth(ctx context.Context, tx *Tx, filter dots.AuthFilter) (_ []*dots.Au
 			access_token, refresh_token, 
 			expiry, created_at, updated_at,
 			count(*) over(),
-			(select coalesce(jsonb_agg(u.*), '[{}]'::jsonb) from "user" u where u.id = user_id limit 1)::jsonb->0 "user"
-		from "auth"
+			(select coalesce(jsonb_agg(u.*), '[{}]'::jsonb) from core."user" u where u.id = user_id limit 1)::jsonb->0 "user"
+		from core."auth"
 		where `+strings.Join(where, " and ")+`
 		order by id asc
 		`+formatLimitOffset(filter.Limit, filter.Offset),
@@ -275,7 +275,7 @@ func updateAuth(
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		update "auth"
+		update core."auth"
 		set access_token = $1, refresh_token = $2, expiry = $3, updated_at = $4
 	`, auth.AccessToken, auth.RefreshToken, auth.Expiry, auth.UpdatedAt)
 	if err != nil {
@@ -293,7 +293,7 @@ func deleteAuth(ctx context.Context, tx *Tx, id int) error {
 		return dots.Errorf(dots.ENOTFOUND, "auth not found")
 	}
 
-	_, err = tx.ExecContext(ctx, `delete from "auth" where id = $1`, id)
+	_, err = tx.ExecContext(ctx, `delete from core."auth" where id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("postgres.auth: cannot delete auth: %w", err)
 	}

@@ -97,6 +97,7 @@ func main() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		<-c
+		log.Println("cnnceling server...")
 		cancel()
 	}()
 

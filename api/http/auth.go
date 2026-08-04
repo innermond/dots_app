@@ -49,7 +49,7 @@ func (s *Server) handleTokening(w http.ResponseWriter, r *http.Request) {
 
 	str, err := s.TokenService.Create(r.Context(), cc)
 	if err != nil {
-		Error(w, r, dots.Errorf(dots.EINVALID, "[create token]: %v", err))
+		Error(w, r, dots.Errorf(dots.EUNAUTHORIZED, "[create token]: %v", err))
 		return
 	}
 

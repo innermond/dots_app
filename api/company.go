@@ -2,17 +2,14 @@ package dots
 
 import (
 	"context"
-	"regexp"
-
-	"github.com/segmentio/ksuid"
+	"strings"
 )
 
 type Company struct {
-	ID       int         `json:"id"`
-	TID      ksuid.KSUID `json:"tid"`
-	Longname string      `json:"longname"`
-	TIN      string      `json:"tin"`
-	RN       string      `json:"rn"`
+	ID       int    `json:"id"`
+	Longname string `json:"longname"`
+	TIN      string `json:"tin"`
+	RN       string `json:"rn"`
 }
 
 func (c *Company) Validate() error {
@@ -20,35 +17,24 @@ func (c *Company) Validate() error {
 		return Errorf(EINVALID, "all name, tax identification number and  registration number are required")
 	}
 
-	suspects := []string{c.Longname, c.TIN, c.RN}
-	// all utf-8 except control charatcters
-	pattern := "^[[:^cntrl:]]+$"
-	re := regexp.MustCompile(pattern)
-	for _, suspect := range suspects {
-		match := re.MatchString(suspect)
-		if !match {
-			return Errorf(EINVALID, "input is not a text line")
-		}
+	suspects := map[string]*string{
+		"longname": &c.Longname,
+		"tin":      &c.TIN,
+		"rn":       &c.RN,
 	}
-	// only white spaces
-	pattern = "^\\s+$"
-	re = regexp.MustCompile(pattern)
-	for _, suspect := range suspects {
-		match := re.MatchString(suspect)
-		if match {
-			return Errorf(EINVALID, "emptyness as input")
-		}
+	err := printable(suspects)
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
 type CompanyFilter struct {
-	ID       *int         `json:"id"`
-	TID      *ksuid.KSUID `json:"tid"`
-	Longname *string      `json:"longname"`
-	TIN      *string      `json:"tin"`
-	RN       *string      `json:"rn"`
+	ID       *int    `json:"id"`
+	Longname *string `json:"longname"`
+	TIN      *string `json:"tin"`
+	RN       *string `json:"rn"`
 
 	Offset int `json:"offset"`
 	Limit  int `json:"limit"`
@@ -74,19 +60,56 @@ type CompanyService interface {
 	UpdateCompany(context.Context, int, CompanyUpdate) (*Company, error)
 	FindCompany(context.Context, CompanyFilter) ([]*Company, int, error)
 	DeleteCompany(context.Context, int, CompanyDelete) (int, error)
+	StatsCompany(context.Context, CompanyFilter) (*CompanyStats, error)
+	DepletionCompany(context.Context, CompanyFilter) ([]*CompanyDepletion, int, error)
 }
 
 type CompanyUpdate struct {
-	TID      *ksuid.KSUID `json:"tid"`
-	Longname *string      `json:"longname"`
-	TIN      *string      `json:"tin"`
-	RN       *string      `json:"rn"`
+	Longname *string `json:"longname"`
+	TIN      *string `json:"tin"`
+	RN       *string `json:"rn"`
 }
 
-func (cu *CompanyUpdate) Valid() error {
+func (cu *CompanyUpdate) Validate() error {
+	// required
 	if cu.Longname == nil && cu.TIN == nil && cu.RN == nil {
-		return Errorf(EINVALID, "at least name, tax identification number and  registration number are required")
+		return Errorf(EINVALID, "al least one of name, tax identification number or registration number are required")
+	}
+
+	// trim white space
+	if cu.Longname != nil {
+		if len(*cu.Longname) == 0 {
+			return Errorf(EINVALID, "name need content")
+		}
+		*cu.Longname = strings.Trim(*cu.Longname, " ")
+	}
+	if cu.TIN != nil {
+		if len(*cu.TIN) == 0 {
+			return Errorf(EINVALID, "tax identification  number need content")
+		}
+		*cu.TIN = strings.Trim(*cu.TIN, " ")
+	}
+	if cu.RN != nil {
+		if len(*cu.RN) == 0 {
+			return Errorf(EINVALID, "registration number need content")
+		}
+		*cu.RN = strings.Trim(*cu.RN, " ")
 	}
 
 	return nil
+}
+
+type CompanyStats struct {
+	CountCompanies  int `json:"count_companies"`
+	CountDeeds      int `json:"count_deeds"`
+	CountEntries    int `json:"count_entries"`
+	CountEntryTypes int `json:"count_entry_types"`
+}
+
+type CompanyDepletion struct {
+	EntryTypeID     *int     `json:"entry_type_id"`
+	Code            *string  `json:"code"`
+	Description     *string  `json:"description,omitempty"`
+	QuantityInitial *float64 `json:"quantity_initial"`
+	QuantityDrained *float64 `json:"quantity_drained"`
 }

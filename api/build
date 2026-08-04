@@ -1,17 +1,17 @@
 #!/bin/bash
 cd $(dirname "$0")
 
-GIT_HASH=$(git describe)
-
-if test $? -ne 0; then
-  echo "trying other way"
-  GIT_HASH=$(git rev-list -1 HEAD)
-fi
-
 if [ "$1" == "debug" ]; then
   echo "[building with debug flags]"
   go build -o  dist/server -gcflags "all=-N -l" cmd/dotsd/main.go
 else
+  GIT_HASH=$(git describe)
+
+  if test $? -ne 0; then
+    echo "trying other way"
+    GIT_HASH=$(git rev-list -1 HEAD)
+  fi
+
   echo "[building with git hash]"
   go build -o dist/server -ldflags "-X main.ServerGitHash=$GIT_HASH" cmd/dotsd/main.go
 fi
@@ -20,3 +20,5 @@ if test $? -ne 0; then
   echo "[build failed]"
   exit 1
 fi
+
+echo "[build succeeded]"

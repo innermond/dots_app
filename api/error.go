@@ -12,13 +12,14 @@ const (
 	ENOTFOUND       = "not_found"
 	ENOTIMPLEMENTED = "not_implemented"
 	EUNAUTHORIZED   = "unauthorized"
+	ENOTAFFECTED    = "not_affected"
 )
 
 type Error struct {
 	Code    string
 	Message string
-
-	err error
+	Data    map[string]interface{}
+	err     error
 }
 
 func (e *Error) Error() string {
@@ -32,6 +33,11 @@ func (e *Error) Wrap(err error) error {
 
 func (e *Error) Unwrap() error {
 	return e.err
+}
+
+func (e *Error) WithData(d map[string]interface{}) *Error {
+	e.Data = d
+	return e
 }
 
 func ErrorCode(err error) string {
@@ -55,6 +61,19 @@ func ErrorMessage(err error) string {
 		return e.Message
 	}
 	return "internal"
+}
+
+func ErrorData(err error) map[string]interface{} {
+	errdata := map[string]interface{}{}
+	if err == nil {
+		return errdata
+	}
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Data
+	}
+
+	return errdata
 }
 
 func Errorf(code string, format string, args ...interface{}) *Error {

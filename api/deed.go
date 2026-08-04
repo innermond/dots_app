@@ -7,16 +7,18 @@ import (
 )
 
 type Deed struct {
-	ID        int             `json:"id"`
-	CompanyID int             `json:"company_id"`
-	Title     string          `json:"title"`
-	Quantity  float64         `json:"quantity"`
-	Unit      string          `json:"unit"`
-	UnitPrice decimal.Decimal `json:"unitprice"`
-
-	EntryID         *int     `json:"entry_id,omitempty"`
-	DrainedQuantity *float64 `json:"drained_quantity,omitempty"`
+	ID *int `json:"id"`
+	DeedUpdate
 }
+
+type DistributeDrain string
+
+const (
+	DistributeNewMany DistributeDrain = "new_many"
+	DistributeNewFew  DistributeDrain = "new_few"
+	DistributeOldMany DistributeDrain = "old_many"
+	DistributeOldFew  DistributeDrain = "old_few"
+)
 
 func (d *Deed) Validate() error {
 	return nil
@@ -26,7 +28,7 @@ type DeedService interface {
 	CreateDeed(context.Context, *Deed) error
 	UpdateDeed(context.Context, int, DeedUpdate) (*Deed, error)
 	FindDeed(context.Context, DeedFilter) ([]*Deed, int, error)
-	DeleteDeed(context.Context, DeedDelete) (int, error)
+	DeleteDeed(context.Context, int, DeedDelete) (int, error)
 }
 
 type DeedFilter struct {
@@ -45,9 +47,8 @@ type DeedFilter struct {
 }
 
 type DeedDelete struct {
-	DeedFilter
-
-	Resurect bool
+	Undrain  bool `json:"undrain" presence_is:"true"`
+	Resurect bool `json:"resurect" presence_is:"true"`
 }
 
 type DeedUpdate struct {
@@ -57,9 +58,21 @@ type DeedUpdate struct {
 	Unit      *string          `json:"unit"`
 	UnitPrice *decimal.Decimal `json:"unitprice"`
 
-	EntryID         *int     `json:"entry_id"`
-	DrainedQuantity *float64 `json:"drained_quantity"`
+	Distribute map[int]float64 `json:"distribute,omitempty"`
+
+	EntryTypeDistribute map[int]float64  `json:"entry_type_distribute,omitempty"`
+	DistributeStrategy  *DistributeDrain `json:"distribute_strategy,omitempty"`
 }
+
+// TODO it panics violently!!!
+/*func (du *DeedUpdate) UnmarshalJSON(b []byte) (err error) {
+	d := DeedUpdate{}
+	if err := json.Unmarshal(b, &d); err != nil {
+		return err
+	}
+	*du = DeedUpdate(d)
+	return
+}*/
 
 func (du *DeedUpdate) Valid() error {
 	if du.Title == nil && du.Quantity == nil && du.Unit == nil {

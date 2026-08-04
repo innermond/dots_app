@@ -1,0 +1,5 @@
+#!/bin/bash
+cd $(dirname "$0")
+
+ dlv --listen=:40000 --headless=true --api-version=2 --check-go-version=true exec $1
+

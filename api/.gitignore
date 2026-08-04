@@ -3,6 +3,8 @@
 .securecookie
 __debug_bin
 tmp
+debug.test
+testdata
 dist/server
 .air.toml
 

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/innermond/dots"
-	"github.com/segmentio/ksuid"
 )
 
 type CompanyService struct {
@@ -19,9 +18,8 @@ func NewCompanyService(db *DB) *CompanyService {
 }
 
 func (s *CompanyService) CreateCompany(ctx context.Context, c *dots.Company) error {
-	user := dots.UserFromContext(ctx)
-	if user.ID == ksuid.Nil {
-		return dots.Errorf(dots.EUNAUTHORIZED, "unauthorized user")
+	if err := c.Validate(); err != nil {
+		return err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -30,37 +28,16 @@ func (s *CompanyService) CreateCompany(ctx context.Context, c *dots.Company) err
 	}
 	defer tx.Rollback()
 
-	if canerr := dots.CanDoAnything(ctx); canerr == nil {
-		// owner company can be different than current user (assumed to be a super-user)
-		// but not missing
-		if c.TID.IsNil() {
-			return dots.Errorf(dots.EINVALID, "missing owner identificator")
-		}
-		err := companyCheckDeleted(ctx, tx, *c)
-		if err != nil {
-			return err
-		}
-
-		return createCompany(ctx, tx, c)
-	}
-
 	if canerr := dots.CanCreateOwn(ctx); canerr != nil {
 		return canerr
 	}
 
-	// a user trying to set a TID other than his own
-	if !c.TID.IsNil() && c.TID != user.ID {
-		return dots.Errorf(dots.EUNAUTHORIZED, "unauthorized user")
-	}
-	// lock owner company to user
-	c.TID = user.ID
-	err = companyCheckDeleted(ctx, tx, *c)
-	if err != nil {
+	if err := tx.setUserIDPerConnection(ctx); err != nil {
 		return err
 	}
 
 	if err := createCompany(ctx, tx, c); err != nil {
-		return err
+		return perr(err)
 	}
 
 	tx.Commit()
@@ -75,59 +52,34 @@ func (s *CompanyService) FindCompany(ctx context.Context, filter dots.CompanyFil
 	}
 	defer tx.Rollback()
 
-	if canerr := dots.CanDoAnything(ctx); canerr == nil {
-		return findCompany(ctx, tx, filter)
-	}
-
 	if canerr := dots.CanReadOwn(ctx); canerr != nil {
 		return nil, 0, canerr
 	}
 
-	uid := dots.UserFromContext(ctx).ID
-	// trying to get companies for a different TID
-	if filter.TID != nil && *filter.TID != uid {
-		// will get empty results and not error
-		return make([]*dots.Company, 0), 0, nil
+	if err := tx.setUserIDPerConnection(ctx); err != nil {
+		return nil, 0, err
 	}
-	// lock search to own
-	filter.TID = &uid
 
 	return findCompany(ctx, tx, filter)
 }
 
 func (s *CompanyService) UpdateCompany(ctx context.Context, id int, upd dots.CompanyUpdate) (*dots.Company, error) {
+	if err := upd.Validate(); err != nil {
+		return nil, err
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	if upd.TID.IsNil() {
-		return nil, dots.Errorf(dots.EINVALID, "missing owner identificator")
-	}
-
-	company := dots.Company{ID: id}
-	err = companyCheckDeleted(ctx, tx, company)
-	if err != nil {
-		return nil, err
-	}
-
-	if canerr := dots.CanDoAnything(ctx); canerr == nil {
-		return updateCompany(ctx, tx, id, upd)
-	}
-
-	uid := dots.UserFromContext(ctx).ID
-	err = companyBelongsToUser(ctx, tx, uid, id)
-	if err != nil {
-		return nil, err
-	}
-
-	if upd.TID != nil && uid != *upd.TID {
-		return nil, dots.Errorf(dots.EINVALID, "update company: unexpected user")
-	}
-
-	if canerr := dots.CanWriteOwn(ctx, *upd.TID); canerr != nil {
+	if canerr := dots.CanWriteOwn(ctx); canerr != nil {
 		return nil, canerr
+	}
+
+	if err := tx.setUserIDPerConnection(ctx); err != nil {
+		return nil, err
 	}
 
 	c, err := updateCompany(ctx, tx, id, upd)
@@ -147,48 +99,73 @@ func (s *CompanyService) DeleteCompany(ctx context.Context, id int, filter dots.
 	}
 	defer tx.Rollback()
 
-	if canerr := dots.CanDoAnything(ctx); canerr == nil {
-		var n int
-		var err error
-
-		if filter.Hard {
-			n, err = deleteCompanyPermanently(ctx, tx, id)
-		} else {
-			n, err = deleteCompany(ctx, tx, id, filter.Resurect)
-		}
-		if err != nil {
-			return n, err
-		}
-
-		tx.Commit()
-
-		return n, err
-	}
-
 	if canerr := dots.CanDeleteOwn(ctx); canerr != nil {
 		return 0, canerr
 	}
 
-	var n int
-	uid := dots.UserFromContext(ctx).ID
-
-	err = companyBelongsToUser(ctx, tx, uid, id)
-	if err != nil {
+	if err := tx.setUserIDPerConnection(ctx); err != nil {
 		return 0, err
 	}
 
+	n := 0
+	tpl := "company %d not affected"
 	if filter.Hard {
 		n, err = deleteCompanyPermanently(ctx, tx, id)
+		tpl += " (hard)"
 	} else {
 		n, err = deleteCompany(ctx, tx, id, filter.Resurect)
+		if filter.Resurect {
+			tpl += " (resurect)"
+		} else {
+			tpl += " (soft)"
+		}
 	}
 	if err != nil {
 		return n, err
+	}
+	if n == 0 {
+		return 0, dots.Errorf(dots.ENOTAFFECTED, tpl, id)
 	}
 
 	tx.Commit()
 
 	return n, err
+}
+
+func (s *CompanyService) StatsCompany(ctx context.Context, filter dots.CompanyFilter) (*dots.CompanyStats, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if canerr := dots.CanReadOwn(ctx); canerr != nil {
+		return nil, canerr
+	}
+
+	if err := tx.setUserIDPerConnection(ctx); err != nil {
+		return nil, err
+	}
+
+	return statsCompany(ctx, tx, filter)
+}
+
+func (s *CompanyService) DepletionCompany(ctx context.Context, filter dots.CompanyFilter) ([]*dots.CompanyDepletion, int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+
+	if canerr := dots.CanReadOwn(ctx); canerr != nil {
+		return nil, 0, canerr
+	}
+
+	if err := tx.setUserIDPerConnection(ctx); err != nil {
+		return nil, 0, err
+	}
+
+	return depletionCompany(ctx, tx, filter)
 }
 
 func findCompany(ctx context.Context, tx *Tx, filter dots.CompanyFilter) (_ []*dots.Company, n int, err error) {
@@ -205,21 +182,25 @@ func findCompany(ctx context.Context, tx *Tx, filter dots.CompanyFilter) (_ []*d
 	if v := filter.RN; v != nil {
 		where, args = append(where, "rn = ?"), append(args, *v)
 	}
-	if v := filter.TID; v != nil {
-		where, args = append(where, "tid = ?"), append(args, *v)
-	}
-	replaceQuestionMark(where, args)
 
-	v := filter.IsDeleted
-	if v != nil && *v == true {
-		where = append(where, "deleted_at is not null")
-	} else if v != nil && *v == false {
-		where = append(where, "deleted_at is null")
+	// TODO deal with isDeleted
+	/*	v := filter.IsDeleted
+		if v != nil && *v {
+			where = append(where, "deleted_at is not null")
+		} else if v != nil && !*v {
+			where = append(where, "deleted_at is null")
+		} else if v == nil {
+			where = append(where, "deleted_at is null")
+		}
+	*/
+	wherestr := ""
+	if len(where) > 0 {
+		replaceQuestionMark(where, args)
+		wherestr = "where " + strings.Join(where, " and ")
 	}
-
 	sqlstr := `
-		select id, longname, tin, rn, tid, count(*) over() from company
-		where ` + strings.Join(where, " and ") + ` ` + formatLimitOffset(filter.Limit, filter.Offset)
+		select id, longname, tin, rn, count(*) over() from company
+		` + wherestr + ` ` + formatLimitOffset(filter.Limit, filter.Offset)
 	rows, err := tx.QueryContext(
 		ctx,
 		sqlstr,
@@ -236,7 +217,7 @@ func findCompany(ctx context.Context, tx *Tx, filter dots.CompanyFilter) (_ []*d
 	companies := []*dots.Company{}
 	for rows.Next() {
 		var e dots.Company
-		err := rows.Scan(&e.ID, &e.Longname, &e.TIN, &e.RN, &e.TID, &n)
+		err := rows.Scan(&e.ID, &e.Longname, &e.TIN, &e.RN, &n)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -250,22 +231,18 @@ func findCompany(ctx context.Context, tx *Tx, filter dots.CompanyFilter) (_ []*d
 }
 
 func createCompany(ctx context.Context, tx *Tx, c *dots.Company) error {
-	if err := c.Validate(); err != nil {
-		return err
-	}
-
-	err := tx.QueryRowContext(
-		ctx,
-		`
+	sqlstr, args := `
 insert into company
-(longname, tin, rn, tid)
+(longname, tin, rn)
 values
-($1, $2, $3, $4) returning id
-		`,
-		c.Longname, c.TIN, c.RN,
-		c.TID,
-	).Scan(&c.ID)
-	if err != nil {
+($1, $2, $3) returning id
+	`, []interface{}{c.Longname, c.TIN, c.RN}
+
+	if err := tx.QueryRowContext(
+		ctx,
+		sqlstr,
+		args...,
+	).Scan(&c.ID); err != nil {
 		return err
 	}
 
@@ -283,6 +260,7 @@ func updateCompany(ctx context.Context, tx *Tx, id int, updata dots.CompanyUpdat
 	ct := cc[0]
 
 	set, args := []string{}, []interface{}{}
+
 	if v := updata.Longname; v != nil {
 		ct.Longname = *v
 		set, args = append(set, "longname = ?"), append(args, *v)
@@ -295,7 +273,11 @@ func updateCompany(ctx context.Context, tx *Tx, id int, updata dots.CompanyUpdat
 		ct.RN = *v
 		set, args = append(set, "rn = ?"), append(args, *v)
 	}
-	replaceQuestionMark(set, args)
+
+	for inx, v := range set {
+		v = strings.Replace(v, "?", fmt.Sprintf("$%d", inx+1), 1)
+		set[inx] = v
+	}
 	args = append(args, id)
 
 	sqlstr := `
@@ -312,37 +294,33 @@ func updateCompany(ctx context.Context, tx *Tx, id int, updata dots.CompanyUpdat
 }
 
 func deleteCompany(ctx context.Context, tx *Tx, id int, resurect bool) (n int, err error) {
-	where, args := []string{}, []interface{}{}
-	where, args = append(where, "c.id = ?"), append(args, id)
-	replaceQuestionMark(where, args)
+	where := []string{"core.company.id = $1"}
 
 	kind := "date_trunc('minute', now())::timestamptz"
 	if resurect {
 		kind = "null"
-		where = append(where, "c.deleted_at is not null")
+		where = append(where, "core.company.deleted_at is not null")
 	} else {
-		where = append(where, "c.deleted_at is null")
+		where = append(where, "core.company.deleted_at is null")
 	}
 
-	whereEntries, whereDeeds := make([]string, len(where)), make([]string, len(where))
-	copy(whereEntries, where)
-	copy(whereDeeds, where)
-	whereEntries = append(whereEntries, "e.company_id is null")
-	whereDeeds = append(whereDeeds, "d.company_id is null")
+	wherestr := "where " + strings.Join(where, " and ")
 
-	sqlstr := `
-		update company set deleted_at = %s where id = %d and id = any(
-		select c.id from company c left join entry e on(c.id = e.company_id)
-		where %s) or id = any(
-		select c.id from company c left join deed d on(c.id = d.company_id)
-		where %s)`
-	conditionEntries := strings.Join(whereEntries, " and ")
-	conditionDeeds := strings.Join(whereDeeds, " and ")
-	sqlstr = fmt.Sprintf(sqlstr, kind, id, conditionEntries, conditionDeeds)
+	bareCompany := `
+	and not exists(
+		select c.id from core.company c join core.entry e on(c.id = e.company_id)
+		where e.company_id = $1 limit 1) 
+	and not exists(
+		select c.id from core.company c join core.deed d on(c.id = d.company_id)
+		where d.company_id = $1 limit 1)`
+
+	sqlstr := `update core.company set deleted_at = %s ` + wherestr + bareCompany
+	sqlstr = fmt.Sprintf(sqlstr, kind)
+
 	result, err := tx.ExecContext(
 		ctx,
 		sqlstr,
-		args...,
+		id,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("postgres.company: cannot soft delete %w", err)
@@ -357,29 +335,23 @@ func deleteCompany(ctx context.Context, tx *Tx, id int, resurect bool) (n int, e
 }
 
 func deleteCompanyPermanently(ctx context.Context, tx *Tx, id int) (n int, err error) {
-	where, args := []string{}, []interface{}{}
-	where, args = append(where, "c.id = ?"), append(args, id)
-	replaceQuestionMark(where, args)
+	where := []string{"core.company.id = $1"}
+	wherestr := "where " + strings.Join(where, " and ")
 
-	whereEntries, whereDeeds := make([]string, len(where)), make([]string, len(where))
-	copy(whereEntries, where)
-	copy(whereDeeds, where)
-	whereEntries = append(whereEntries, "e.company_id is null")
-	whereDeeds = append(whereDeeds, "d.company_id is null")
+	bareCompany := `
+	and not exists(
+		select c.id from core.company c join core.entry e on(c.id = e.company_id)
+		where e.company_id = $1 limit 1) 
+	and not exists(
+		select c.id from core.company c join core.deed d on(c.id = d.company_id)
+		where d.company_id = $1 limit 1)`
 
-	sqlstr := `
-		delete from company where id = %d and id = any(
-		select c.id from company c left join entry e on(c.id = e.company_id)
-		where %s) or id = any(
-		select c.id from company c left join deed d on(c.id = d.company_id)
-		where %s)`
-	conditionEntries := strings.Join(whereEntries, " and ")
-	conditionDeeds := strings.Join(whereDeeds, " and ")
-	sqlstr = fmt.Sprintf(sqlstr, id, conditionEntries, conditionDeeds)
+	sqlstr := `delete from core.company ` + wherestr + bareCompany
+
 	result, err := tx.ExecContext(
 		ctx,
 		sqlstr,
-		args...,
+		id,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("postgres.company: cannot hard delete %w", err)
@@ -393,51 +365,143 @@ func deleteCompanyPermanently(ctx context.Context, tx *Tx, id int) (n int, err e
 	return int(n64), nil
 }
 
-func companyBelongsToUser(ctx context.Context, tx *Tx, u ksuid.KSUID, companyID int) error {
+func companyBelongsToUser(ctx context.Context, tx *Tx, companyID int) error {
 	sqlstr := `select exists(
 select id
 from company c
-where c.id = $1 and c.tid = $2
+where c.id = $1
 );
 `
 	var exists bool
-	err := tx.QueryRowContext(ctx, sqlstr, companyID, u).Scan(&exists)
+	err := tx.QueryRowContext(ctx, sqlstr, companyID).Scan(&exists)
 	if err != nil {
 		return err
 	}
+
 	if !exists {
-		return dots.Errorf(dots.EUNAUTHORIZED, "foreign entry")
+		return dots.Errorf(dots.ENOTFOUND, "company not found")
 	}
 
 	return nil
 }
 
-func companyCheckDeleted(ctx context.Context, tx *Tx, c dots.Company) error {
-	// new company should not be a soft deleted old one
-	IsDeleted := true
-	filterFind := dots.CompanyFilter{IsDeleted: &IsDeleted}
-	if c.ID != 0 {
-		filterFind.ID = &c.ID
+func statsCompany(ctx context.Context, tx *Tx, filter dots.CompanyFilter) (_ *dots.CompanyStats, err error) {
+	where, args := []string{}, []interface{}{}
+	if v := filter.ID; v != nil {
+		where, args = append(where, "id = ?"), append(args, *v)
 	}
-	if !c.TID.IsNil() {
-		filterFind.TID = &c.TID
+	if v := filter.Longname; v != nil {
+		where, args = append(where, "longname = ?"), append(args, *v)
 	}
-	if c.Longname != "" {
-		filterFind.Longname = &c.Longname
+	if v := filter.TIN; v != nil {
+		where, args = append(where, "tin = ?"), append(args, *v)
 	}
-	if c.TIN != "" {
-		filterFind.TIN = &c.TIN
-	}
-	if c.RN != "" {
-		filterFind.RN = &c.RN
-	}
-	_, n, err := findCompany(ctx, tx, filterFind)
-	if err != nil {
-		return err
-	}
-	if n == 1 {
-		return dots.Errorf(dots.EINVALID, "this company has been deleted")
+	if v := filter.RN; v != nil {
+		where, args = append(where, "rn = ?"), append(args, *v)
 	}
 
-	return nil
+	wherestr := ""
+	if len(where) > 0 {
+		replaceQuestionMark(where, args)
+		wherestr = "where " + strings.Join(where, " and ")
+	}
+	sqlstr := `WITH c AS
+(SELECT id FROM api.company ` + wherestr + `)
+SELECT
+  count_companies,
+  count_deeds,
+  count_entries,
+  count_entry_type
+FROM (
+  SELECT
+    (SELECT count(*) FROM c) AS count_companies,
+    (SELECT count(*) FROM api.deed WHERE company_id = any(SELECT id FROM c)) AS count_deeds,
+    (SELECT count(*) FROM api.entry WHERE company_id IN (SELECT id FROM c)) AS count_entries,
+    (SELECT count(*) FROM api.entry_type) AS count_entry_type
+) counts;`
+
+	stats := &dots.CompanyStats{}
+	err = tx.QueryRowContext(
+		ctx,
+		sqlstr,
+		args...,
+	).Scan(&stats.CountCompanies, &stats.CountDeeds, &stats.CountEntries, &stats.CountEntryTypes)
+	if err == sql.ErrNoRows {
+		return nil, dots.Errorf(dots.ENOTFOUND, "company not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return stats, nil
+}
+
+func depletionCompany(ctx context.Context, tx *Tx, filter dots.CompanyFilter) (_ []*dots.CompanyDepletion, n int, err error) {
+	cc, n, err := findCompany(ctx, tx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	cids := []int{}
+	for _, c := range cc {
+		cids = append(cids, c.ID)
+	}
+
+	wherestr := "where ed.company_id = any($1)"
+
+	sqlstr := `with er as (
+	select
+		ed.id,
+		ed.entry_type_id,
+		et.code,
+		et.description,
+		ed.quantity_initial,
+		ed.quantity_drained,
+		(ed.quantity_initial - ed.quantity_drained) as remained
+	from
+		api.entry_with_quantity_drained ed
+	join api.entry_type et on
+		ed.entry_type_id = et.id
+		` + wherestr + `
+  order by remained
+)
+select
+	er.entry_type_id,
+	er.code, er.description,
+	Sum(quantity_initial) quantity_initial,
+	sum(quantity_drained) quantity_drained
+from er
+where
+	er.remained > 0
+	group by er.entry_type_id, er.code, er.description
+	limit 3;`
+	fmt.Println(sqlstr, cids)
+	rows, err := tx.QueryContext(
+		ctx,
+		sqlstr,
+		cids,
+	)
+	if err == sql.ErrNoRows {
+		return nil, 0, dots.Errorf(dots.ENOTFOUND, "depletion for company not found")
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	cd := []*dots.CompanyDepletion{}
+	for rows.Next() {
+		var e dots.CompanyDepletion
+		err := rows.Scan(&e.EntryTypeID, &e.Code, &e.Description, &e.QuantityInitial, &e.QuantityDrained)
+		if err != nil {
+			return nil, 0, err
+		}
+		cd = append(cd, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	n = len(cd)
+	return cd, n, nil
 }

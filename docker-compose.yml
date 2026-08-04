@@ -16,7 +16,7 @@ services:
      - VIRTUAL_PORT_SSL=8443
      - HTTPS_METHOD=noredirect
     extra_hosts:
-      - "api.dots.volt.com postgres.dots.volt.com:172.16.0.1"
+      - "postgres.dots.volt.com:172.16.0.1"
     user: "$UID:0"
     working_dir: /go
     volumes:

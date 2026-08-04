@@ -84,7 +84,7 @@ func (s *Server) handleDrainFind(w http.ResponseWriter, r *http.Request) {
 }
 
 type findDrainResponse struct {
-	Drains []*dots.Drain `json:"entrY_types"`
+	Drains []*dots.Drain `json:"entry_types"`
 	N          int               `json:"n"`
 }
 */

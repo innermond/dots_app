@@ -10,15 +10,14 @@ import (
 
 func (s *Server) registerDeedRoutes(router *mux.Router) {
 	router.HandleFunc("", s.handleDeedCreate).Methods("POST")
-	router.HandleFunc("/{id}/edit", s.handleDeedUpdate).Methods("PATCH")
+	router.HandleFunc("/{id}", s.handleDeedPatch).Methods("PATCH")
 	router.HandleFunc("", s.handleDeedFind).Methods("GET")
-	router.HandleFunc("", s.handleDeedDelete).Methods("PATCH")
 }
 
 func (s *Server) handleDeedCreate(w http.ResponseWriter, r *http.Request) {
-
 	var d dots.Deed
-	if ok := inputJSON[dots.Deed](w, r, &d, "create deed"); !ok {
+
+	if ok := inputJSON(w, r, &d, "create deed"); !ok {
 		return
 	}
 
@@ -28,7 +27,16 @@ func (s *Server) handleDeedCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outputJSON[dots.Deed](w, r, http.StatusCreated, &d)
+	outputJSON(w, r, http.StatusCreated, &d)
+}
+
+func (s *Server) handleDeedPatch(w http.ResponseWriter, r *http.Request) {
+	if _, found := r.URL.Query()["del"]; found {
+		s.handleDeedDelete(w, r)
+		return
+	}
+
+	s.handleDeedUpdate(w, r)
 }
 
 func (s *Server) handleDeedUpdate(w http.ResponseWriter, r *http.Request) {
@@ -39,13 +47,8 @@ func (s *Server) handleDeedUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var updata dots.DeedUpdate
-	ok := inputJSON[dots.DeedUpdate](w, r, &updata, "update deed")
+	ok := inputJSON(w, r, &updata, "update deed")
 	if !ok {
-		return
-	}
-
-	if err := updata.Valid(); err != nil {
-		Error(w, r, err)
 		return
 	}
 
@@ -55,15 +58,12 @@ func (s *Server) handleDeedUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outputJSON[dots.Deed](w, r, http.StatusOK, d)
+	outputJSON(w, r, http.StatusOK, d)
 }
 
 func (s *Server) handleDeedFind(w http.ResponseWriter, r *http.Request) {
-	var filter dots.DeedFilter
-	ok := inputJSON[dots.DeedFilter](w, r, &filter, "find deed")
-	if !ok {
-		return
-	}
+	filter := dots.DeedFilter{}
+	input(w, r, &filter, "find deed")
 
 	dd, n, err := s.DeedService.FindDeed(r.Context(), filter)
 	if err != nil {
@@ -71,33 +71,24 @@ func (s *Server) handleDeedFind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outputJSON[findDeedResponse](w, r, http.StatusFound, &findDeedResponse{Deeds: dd, N: n})
+	outputJSON(w, r, http.StatusFound, &foundResponse[[]*dots.Deed]{dd, affected{n}})
 }
 
 func (s *Server) handleDeedDelete(w http.ResponseWriter, r *http.Request) {
-	var filter dots.DeedDelete
-	ok := inputJSON[dots.DeedDelete](w, r, &filter, "delete deed")
-	if !ok {
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	if err != nil {
+		Error(w, r, dots.Errorf(dots.EINVALID, "invalid ID format"))
 		return
 	}
 
-	if r.URL.Query().Get("resurect") != "" {
-		filter.Resurect = true
-	}
-	n, err := s.DeedService.DeleteDeed(r.Context(), filter)
+	filter := dots.DeedDelete{}
+	input(w, r, &filter, "delete deed")
+
+	n, err := s.DeedService.DeleteDeed(r.Context(), id, filter)
 	if err != nil {
 		Error(w, r, err)
 		return
 	}
 
-	outputJSON[deleteDeedResponse](w, r, http.StatusFound, &deleteDeedResponse{N: n})
-}
-
-type findDeedResponse struct {
-	Deeds []*dots.Deed `json:"deeds"`
-	N     int          `json:"n"`
-}
-
-type deleteDeedResponse struct {
-	N int `json:"n"`
+	outputJSON(w, r, http.StatusFound, &affected{n})
 }

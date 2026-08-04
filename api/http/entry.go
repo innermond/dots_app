@@ -1,7 +1,6 @@
 package http
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -11,9 +10,9 @@ import (
 
 func (s *Server) registerEntryRoutes(router *mux.Router) {
 	router.HandleFunc("", s.handleEntryCreate).Methods("POST")
-	router.HandleFunc("/{id}/edit", s.handleEntryUpdate).Methods("PATCH")
+	router.HandleFunc("/{id}", s.handleEntryPatch).Methods("PATCH")
 	router.HandleFunc("", s.handleEntryFind).Methods("GET")
-	router.HandleFunc("", s.handleEntryDelete).Methods("PATCH")
+	router.HandleFunc("/{id}", s.handleEntryHardDelete).Methods("DELETE")
 }
 
 func (s *Server) handleEntryCreate(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +31,15 @@ func (s *Server) handleEntryCreate(w http.ResponseWriter, r *http.Request) {
 	outputJSON(w, r, http.StatusCreated, &e)
 }
 
+func (s *Server) handleEntryPatch(w http.ResponseWriter, r *http.Request) {
+	if _, found := r.URL.Query()["del"]; found {
+		s.handleEntryDelete(w, r)
+		return
+	}
+
+	s.handleEntryUpdate(w, r)
+}
+
 func (s *Server) handleEntryUpdate(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
 	if err != nil {
@@ -40,15 +48,7 @@ func (s *Server) handleEntryUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var updata dots.EntryUpdate
-	if err := json.NewDecoder(r.Body).Decode(&updata); err != nil {
-		Error(w, r, dots.Errorf(dots.EINVALID, "edit entry: invalid json body"))
-		return
-	}
-
-	//u := dots.UserFromContext(r.Context())
-
-	if err := updata.Valid(); err != nil {
-		Error(w, r, err)
+	if ok := inputJSON(w, r, &updata, "update entry"); !ok {
 		return
 	}
 
@@ -62,10 +62,8 @@ func (s *Server) handleEntryUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEntryFind(w http.ResponseWriter, r *http.Request) {
-	var filter dots.EntryFilter
-	if ok := inputJSON(w, r, &filter, "find entry"); !ok {
-		return
-	}
+	filter := dots.EntryFilter{}
+	input(w, r, &filter, "find entry")
 
 	ee, n, err := s.EntryService.FindEntry(r.Context(), filter)
 	if err != nil {
@@ -73,20 +71,50 @@ func (s *Server) handleEntryFind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outputJSON(w, r, http.StatusFound, &findEntryResponse{Entries: ee, N: n})
+	status := http.StatusFound
+	if n == 0 {
+		status = http.StatusNotFound
+	}
+	outputJSON(w, r, status, &findEntryResponse{Entries: ee, N: n})
 }
 
 func (s *Server) handleEntryDelete(w http.ResponseWriter, r *http.Request) {
-	var filter dots.EntryDelete
-	ok := inputJSON(w, r, &filter, "delete entry")
-	if !ok {
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	if err != nil {
+		Error(w, r, dots.Errorf(dots.EINVALID, "invalid ID format"))
 		return
 	}
 
-	if r.URL.Query().Get("resurect") != "" {
+	filter := dots.EntryDelete{}
+	if _, found := r.URL.Query()["resurect"]; found {
 		filter.Resurect = true
 	}
-	n, err := s.EntryService.DeleteEntry(r.Context(), filter)
+	n, err := s.EntryService.DeleteEntry(r.Context(), id, filter)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	outputJSON(w, r, http.StatusFound, &deleteEntryResponse{N: n})
+}
+
+func (s *Server) handleEntryHardDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	if err != nil {
+		Error(w, r, dots.Errorf(dots.EINVALID, "invalid ID format"))
+		return
+	}
+
+	var filter dots.EntryDelete
+	if r.Body != http.NoBody {
+		ok := inputJSON(w, r, &filter, "hard delete entry")
+		if !ok {
+			return
+		}
+	}
+	filter.Hard = true
+
+	n, err := s.EntryService.DeleteEntry(r.Context(), id, filter)
 	if err != nil {
 		Error(w, r, err)
 		return

@@ -11,7 +11,10 @@ import (
 func (s *Server) registerEntryTypeRoutes(router *mux.Router) {
 	router.HandleFunc("", s.handleEntryTypeCreate).Methods("POST")
 	router.HandleFunc("/{id}", s.handleEntryTypePatch).Methods("PATCH")
+	router.HandleFunc("", s.handleEntryTypeUnitFind).Methods("GET").Queries("units", "{^$}")
+	router.HandleFunc("", s.handleEntryTypeStats).Methods("GET").Queries("stats", "{^$}", "id", "{^$\\d+$}", "kind", "default")
 	router.HandleFunc("", s.handleEntryTypeFind).Methods("GET")
+	router.HandleFunc("/{id}", s.handleEntryTypeHardDelete).Methods("DELETE")
 }
 
 func (s *Server) handleEntryTypeCreate(w http.ResponseWriter, r *http.Request) {
@@ -31,6 +34,10 @@ func (s *Server) handleEntryTypeCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEntryTypePatch(w http.ResponseWriter, r *http.Request) {
+
+	tourist := dots.TouristFromContext(r.Context())
+	tourist <- "handler"
+
 	if _, found := r.URL.Query()["del"]; found {
 		s.handleEntryTypeDelete(w, r)
 		return
@@ -51,14 +58,6 @@ func (s *Server) handleEntryTypeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := dots.UserFromContext(r.Context())
-	updata.TID = &u.ID
-
-	if err := updata.Valid(); err != nil {
-		Error(w, r, err)
-		return
-	}
-
 	et, err := s.EntryTypeService.UpdateEntryType(r.Context(), id, updata)
 	if err != nil {
 		Error(w, r, err)
@@ -70,22 +69,88 @@ func (s *Server) handleEntryTypeUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEntryTypeFind(w http.ResponseWriter, r *http.Request) {
 	// can accept missing r.Body
-	var filter dots.EntryTypeFilter
+	//filter := dots.EntryTypeFilterOrdered{}
+	//input(w, r, &filter, "find entry type")
 
-	// ensure we have a input body to be sent to json
-	if r.Body != http.NoBody {
-		if ok := inputJSON(w, r, &filter, "find entry type"); !ok {
-			return
+	filterOrdered := dots.EntryTypeFilterOrdered{}
+	keys := []string{"id", "code", "description", "unit", "limit", "offset", "_mask_id", "_mask_code", "_mask_description", "_mask_unit"}
+	qp := r.URL.Query()
+
+	for k, vv := range qp {
+		is := false
+		for _, existent := range keys {
+			if k == existent {
+				is = true
+				break
+			}
+		}
+		if !is {
+			continue
+		}
+
+		switch k {
+		case "id":
+			filterOrdered.ID = vv
+		case "code":
+			filterOrdered.Code = vv
+		case "description":
+			filterOrdered.Description = vv
+		case "unit":
+			filterOrdered.Unit = vv
+		case "limit":
+			if v, err := strconv.Atoi(qp.Get(k)); err == nil {
+				filterOrdered.Limit = v
+			}
+		case "offset":
+			if v, err := strconv.Atoi(qp.Get(k)); err == nil {
+				filterOrdered.Offset = v
+			}
+		case "_mask_id":
+			filterOrdered.MaskID = qp.Get(k)
+		case "_mask_code":
+			filterOrdered.MaskCode = qp.Get(k)
+		case "_mask_description":
+			filterOrdered.MaskDescription = qp.Get(k)
+		case "_mask_unit":
+			filterOrdered.MaskUnit = qp.Get(k)
 		}
 	}
 
-	ee, n, err := s.EntryTypeService.FindEntryType(r.Context(), filter)
+	ee, n, err := s.EntryTypeService.FindEntryType(r.Context(), filterOrdered)
 	if err != nil {
 		Error(w, r, err)
 		return
 	}
 
-	outputJSON(w, r, http.StatusFound, &findEntryTypeResponse{EntryTypes: ee, N: n})
+	outputJSON(w, r, http.StatusOK, &foundResponse[[]*dots.EntryType]{ee, affected{n}})
+}
+
+func (s *Server) handleEntryTypeStats(w http.ResponseWriter, r *http.Request) {
+	// can accept missing r.Body
+	filter := dots.StatsFilter{}
+	input(w, r, &filter, "find entry type stats")
+
+	ee, err := s.EntryTypeService.FindEntryTypeStats(r.Context(), filter)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	outputJSON(w, r, http.StatusOK, &foundResponse[map[string]string]{ee, affected{len(ee)}})
+}
+
+func (s *Server) handleEntryTypeUnitFind(w http.ResponseWriter, r *http.Request) {
+	// can accept missing r.Body
+	filter := dots.EntryTypeFilter{}
+	input(w, r, &filter, "find entry type unit")
+
+	ee, n, err := s.EntryTypeService.FindEntryTypeUnit(r.Context())
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	outputJSON(w, r, http.StatusOK, &foundResponse[[]string]{ee, affected{n}})
 }
 
 func (s *Server) handleEntryTypeDelete(w http.ResponseWriter, r *http.Request) {
@@ -112,14 +177,30 @@ func (s *Server) handleEntryTypeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outputJSON(w, r, http.StatusFound, &deleteEntryTypeResponse{N: n})
+	outputJSON(w, r, http.StatusFound, &affected{n})
 }
 
-type findEntryTypeResponse struct {
-	EntryTypes []*dots.EntryType `json:"entrY_types"`
-	N          int               `json:"n"`
-}
+func (s *Server) handleEntryTypeHardDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	if err != nil {
+		Error(w, r, dots.Errorf(dots.EINVALID, "invalid ID format"))
+		return
+	}
 
-type deleteEntryTypeResponse struct {
-	N int `json:"n"`
+	var filter dots.EntryTypeDelete
+	if r.Body != http.NoBody {
+		ok := inputJSON(w, r, &filter, "hard delete entry type")
+		if !ok {
+			return
+		}
+	}
+	filter.Hard = true
+
+	n, err := s.EntryTypeService.DeleteEntryType(r.Context(), id, filter)
+	if err != nil {
+		Error(w, r, err)
+		return
+	}
+
+	outputJSON(w, r, http.StatusOK, &affected{n})
 }
